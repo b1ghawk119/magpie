@@ -1341,7 +1341,7 @@ func unanswered(key string, c candidate) {
 // blob", which names no item and says nothing of encrypted content,
 // where the #3392 shaping (xaiBody's) never runs because the relay's
 // host isn't api.x.ai.
-var foreignReasoning = lazyre.New(`(?i)invalid_encrypted_content|invalid[ _]encrypted[ _](summary|content)|encrypted[ _]content.{0,80}could not be (verified|decrypted)|could not (decrypt|verify).{0,40}encrypted[ _]content|could not (decode|decrypt).{0,20}compaction[ _]blob`)
+var foreignReasoning = lazyre.New(`(?i)encrypted_content_decryption_failed|encrypted_context_invalid|invalid_encrypted_content|invalid[ _]encrypted[ _](summary|content)|encrypted[ _]content.{0,80}could not be (verified|decrypted)|could not (decrypt|verify).{0,40}encrypted[ _]content|could not (decode|decrypt).{0,20}compaction[ _]blob`)
 
 // refusedSeals remembers, per conversation and the key or account that
 // refused it, what another one sealed: its reasoning, and the sealed copy

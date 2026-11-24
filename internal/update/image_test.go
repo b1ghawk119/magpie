@@ -20,7 +20,7 @@ func TestImageIsTheReleasesOwnTag(t *testing.T) {
 		}
 	}
 	// docker.yml tags a release's image with its version, "v" taken off
-	y, err := os.ReadFile("../../.github/workflows/docker.yml")
+	y, err := os.ReadFile("../../fork/upstream-workflows/docker.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

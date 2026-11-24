@@ -1015,13 +1015,40 @@ function routingPage(part) {
     return t("Nothing could take {model}.", { model: r.model });
   }
 
+  function checkpointWhy(r) {
+    const last = r.tries.at(-1);
+    const recovery = r.tries.find(tr => ["retry with local checkpoint excerpt", "retry with writer's checkpoint summary", "retry with visible history only"].includes(tr.fail));
+    if (!r.compaction && !recovery) return "";
+    const parts = [];
+    if (r.compaction) {
+      const entry = r.order.find(w => w.id === r.compaction);
+      const provider = r.compaction.split("#")[0];
+      const writer = entry ? where(entry) : providers?.providers?.find(p => p.id === provider)?.name || provider;
+      parts.push(t("This request carries a native compaction item written by {writer}.", { writer }));
+    }
+    if (r.done && r.status >= 200 && r.status < 300 && !r.error && last?.done && last.status >= 200 && last.status < 300 && tryOk(last)) {
+      const entry = tried(r, last);
+      const reader = entry ? where(entry) : last.id;
+      switch (recovery?.fail) {
+        case "retry with local checkpoint excerpt": parts.push(t("{reader} continued with a local excerpt.", { reader })); break;
+        case "retry with writer's checkpoint summary": parts.push(t("{reader} continued with a text summary from the original writer.", { reader })); break;
+        case "retry with visible history only": parts.push(t("{reader} continued with visible messages only.", { reader })); break;
+        default: parts.push(t("{reader} continued with the original item.", { reader }));
+      }
+    }
+    return parts.join(" ");
+  }
+
+  function routeWhy(r) {
+    return checkpointWhy(r) || affWhy(r, true) || ruleWhy(r, true) || firstWhy(r);
+  }
+
   // why routing put the first where it did
   function firstWhy(r) {
     const f = r.order[0];
     if (!f) return noneWhy(r);
     const w = who(f);
     if (r.sealedTask && r.leadAccount === f.id) return t("{who} goes first: it answered the parent agent and may be needed to read this encrypted task.", { who: w });
-    if (r.compaction && r.order.length === 1) return t("{who} compacted this conversation natively, and only it can read that compaction, so the conversation stays on it: other accounts aren't asked. Start a new conversation to use them.", { who: w });
     if (r.order.length === 1) {
       if (f.rest) return t("{who} is the only one, so it's tried though it is resting.", { who: w });
       return f.kind === "account" ? t("{who} is the only account on for {model} — nothing to choose between.", { who: w, model: wentOn(r) })
@@ -3838,7 +3865,10 @@ function routingPage(part) {
     if (r.sealedTask) items.push([t(r.group
       ? "This subagent task is encrypted. Only ChatGPT accounts can read it; other providers (such as Claude) are excluded regardless of quota."
       : "This subagent task is encrypted. Only ChatGPT accounts can read it."), "aside"]);
-    items.push([affWhy(r, true) || ruleWhy(r, true) || firstWhy(r), "why"]);
+    const checkpoint = checkpointWhy(r);
+    if (checkpoint) items.push([checkpoint, "why"]);
+    const routing = affWhy(r, true) || ruleWhy(r, true);
+    if (routing || !checkpoint || r.order.length !== 1 || r.sealedTask) items.push([routing || firstWhy(r), "why"]);
     for (const s of nestedWhy(r)) items.push([s, "why"]);
     // the member a line is about, where it is one: a skipped one's line,
     // an order member's, a try's
@@ -3954,7 +3984,7 @@ function routingPage(part) {
     stopPlays();
     cur = r;
     sync(true); renderAll();
-    say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r));
+    say(routeWhy(r));
   }
 
   // o.context: opened to see its context window (the Usage page's
@@ -5705,7 +5735,7 @@ function routingPage(part) {
     cur = rp ? r : told() || r;
     if (!synced) sync();
     if (cur.id === r.id) {
-      say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r));
+      say(routeWhy(r));
       const aside = asides(r).find((s) => s);
       if (aside) say(aside, true);
     }
@@ -6251,7 +6281,7 @@ function routingPage(part) {
           const asked = wanted && routes.get(wanted), r = pinned || asked || newest();
           if (wanted) { wanted = 0; params.delete("req"); history.replaceState(null, "", params.size ? "?" + params : location.pathname); }
           if (asked && asked.id !== newest().id) pinned = asked;
-          if (r) { cur = r; sync(true); say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r)); renderAll(); } else empty();
+          if (r) { cur = r; sync(true); say(routeWhy(r)); renderAll(); } else empty();
           // the page's first frame came before the trace did, and found
           // nothing to fly: the requests under way fly now, not never
           if (seen && shown()) for (const u of underWay()) if (!playing.has(u.id)) play(u.id);

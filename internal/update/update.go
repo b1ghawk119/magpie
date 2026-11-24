@@ -186,6 +186,12 @@ func latestAt(ctx context.Context, feed, lang string) (*Release, error) {
 }
 
 func latestFrom(ctx context.Context, feed, lang string) (*Release, error) {
+	if u, err := url.Parse(feed); err == nil && strings.HasPrefix(feed, forkFeedRoot) {
+		switch ch := u.Query().Get("channel"); ch {
+		case settings.UpdateStable, settings.UpdateDaily:
+			feed = forkFeedRoot + ch + ".json"
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
 	if err != nil {
 		return nil, err

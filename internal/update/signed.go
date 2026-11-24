@@ -28,7 +28,7 @@ import (
 
 // signingKey is the public half (base64, raw 32 bytes) of the release
 // signing key. A var for tests.
-var signingKey = "3XuYQEohIRDF+zxGQry1iXGZ1cfKYFX3vsST6GSSbYQ="
+var signingKey = "+E0l1DDpck02uuX3RzuVfIBAgF1YKEmVPT4MSgywnDs="
 
 // firstSigned is the first release published with a SHA256SUMS.sig.
 const firstSigned = "0.1.3862"

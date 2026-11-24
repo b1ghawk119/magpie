@@ -242,7 +242,10 @@ func Newer(a, b string) bool {
 			return x.n[i] > y.n[i]
 		}
 	}
-	return comparePre(x.pre, y.pre) > 0
+	if c := comparePre(x.pre, y.pre); c != 0 {
+		return c > 0
+	}
+	return x.hawk > y.hawk
 }
 
 // comparePre orders two pre-releases the way semver does (§11): no
@@ -281,14 +284,15 @@ func comparePre(a, b string) int {
 }
 
 type semver struct {
-	n   [3]int
-	pre string
+	n    [3]int
+	pre  string
+	hawk uint64
 }
 
 func parse(v string) *semver {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	// build metadata ("+sha.5d0c1dc") plays no part in the order
-	v, _, _ = strings.Cut(v, "+")
+	v, build, _ := strings.Cut(v, "+")
 	v, pre, _ := strings.Cut(v, "-")
 	parts := strings.Split(v, ".")
 	if len(parts) != 3 {
@@ -303,6 +307,9 @@ func parse(v string) *semver {
 		s.n[i] = n
 	}
 	s.pre = pre
+	if revision, ok := strings.CutPrefix(build, "hawk."); ok {
+		s.hawk, _ = strconv.ParseUint(revision, 10, 64)
+	}
 	return &s
 }
 

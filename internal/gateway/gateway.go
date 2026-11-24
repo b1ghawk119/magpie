@@ -5081,7 +5081,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					continue
 				}
 			}
-			if !ok && checkpoint == nil && !s.compactsNatively(c.p, c.model) {
+			if !ok && checkpoint == nil && compactionAside(call.Kind, call.Model) && !s.compactsNatively(c.p, c.model) {
 				resealed = 2
 				if b, ok = withoutCompaction(body); ok {
 					refused(stuck, c.vendor(), attemptBody, b)

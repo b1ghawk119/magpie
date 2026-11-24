@@ -7,12 +7,17 @@ on:
         description: Published upstream tag
         required: true
         type: string
+      revision:
+        description: Downstream revision for this upstream tag
+        required: false
+        type: string
+        default: '1'
 concurrency: fork-release-${{ inputs.tag }}
 permissions:
   contents: read
 env:
   REF: ${{ inputs.tag }}
-  VERSION: ${{ format('{0}+hawk.1', inputs.tag) }}
+  VERSION: ${{ format('{0}+hawk.{1}', inputs.tag, inputs.revision || '1') }}
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -37,7 +42,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -tags nogui ./internal/gateway -run 'TestNativeCompaction|TestCrossProvider|TestForeignCompaction'
-      - run: go test -tags nogui ./internal/update -run 'TestAttestation|TestDownloadRefusedWithoutAttestation|TestImageIsTheReleasesOwnTag|TestEmbeddedKey'
+      - run: go test -tags nogui ./internal/update -run 'TestAttestation|TestDownloadRefusedWithoutAttestation|TestImageIsTheReleasesOwnTag|TestEmbeddedKey|TestForkRevision'
   mac:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}

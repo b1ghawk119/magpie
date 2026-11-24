@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = os.environ['GITHUB_REPOSITORY']
-SUFFIX = '+hawk.1'
 
 
 def run(*args, cwd=None):
@@ -16,9 +15,10 @@ def run(*args, cwd=None):
 
 
 def version(tag):
-    numbers, _, pre = tag.removesuffix(SUFFIX)[1:].partition('-')
+    base, revision = tag.split('+hawk.')
+    numbers, _, pre = base[1:].partition('-')
     ids = tuple((0, int(s)) if s.isdigit() else (1, s) for s in pre.split('.'))
-    return tuple(map(int, numbers.split('.'))), not pre, ids
+    return tuple(map(int, numbers.split('.'))), not pre, ids, int(revision)
 
 
 def inventory():
@@ -26,7 +26,7 @@ def inventory():
     for page in range(1, 10000):
         batch = json.loads(run('gh', 'api', f'repos/{REPO}/releases?per_page=100&page={page}'))
         rows.extend(r for r in batch if not r['draft'] and
-                    re.fullmatch(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+hawk\.1', r['tag_name']))
+                    re.fullmatch(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+hawk\.[1-9]\d*', r['tag_name']))
         if len(batch) < 100:
             break
     return sorted(rows, key=lambda r: version(r['tag_name']), reverse=True)

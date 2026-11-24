@@ -89,7 +89,7 @@ import (
 const firstAttested = "0.1.3891"
 
 // attestRepo is where the attestations are stored and what they must name.
-const attestRepo = "yetone/magpie-releases"
+const attestRepo = releaseRepo
 
 //go:embed attest_root.json
 var attestRootJSON []byte
@@ -107,7 +107,7 @@ const siteBundles = "attestations.jsonl"
 
 // attestID is the identity a bundle must show; a var for tests.
 var attestID = struct{ SAN, Issuer, Repo string }{
-	SAN:    `^https://github\.com/` + regexp.QuoteMeta(attestRepo) + `/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9A-Za-z.+-]+)$`,
+	SAN:    `^https://github\.com/` + regexp.QuoteMeta(attestRepo) + `/\.github/workflows/fork-release\.yml@refs/(heads/main|tags/v[0-9A-Za-z.+-]+)$`,
 	Issuer: "https://token.actions.githubusercontent.com",
 	Repo:   "https://github.com/" + attestRepo,
 }

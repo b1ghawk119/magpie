@@ -1,0 +1,377 @@
+name: Build fork release
+run-name: Build ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published upstream tag
+        required: true
+        type: string
+      revision:
+        description: Downstream revision for this upstream tag
+        required: false
+        type: string
+        default: '1'
+concurrency: fork-release-${{ inputs.tag }}
+permissions:
+  contents: read
+env:
+  REF: ${{ inputs.tag }}
+  VERSION: ${{ format('{0}+hawk.{1}', inputs.tag, inputs.revision || '1') }}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.merge.outputs.source }}
+      version: ${{ steps.merge.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: merge
+        run: bash fork/prepare.sh
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -tags nogui ./internal/gateway -run 'TestNativeCompaction|TestCrossProvider|TestForeignCompaction'
+      - run: go test -tags nogui ./internal/update -run 'TestAttestation|TestDownloadRefusedWithoutAttestation|TestImageIsTheReleasesOwnTag|TestEmbeddedKey|TestForkRevision'
+      - name: Verify native checkpoint route details on the merged release
+        run: |
+          npm install --prefix "$RUNNER_TEMP/route-ui" --no-audit --no-fund playwright@1.61.0
+          "$RUNNER_TEMP/route-ui/node_modules/.bin/playwright" install --with-deps chromium webkit
+          NODE_PATH="$RUNNER_TEMP/route-ui/node_modules" node --test internal/gui/tests/routing-compaction.test.cjs
+  mac:
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-15-intel
+            arch: amd64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout magpie source code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Probe macOS signing secrets
+        id: signing
+        env:
+          P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+        run: |
+          if [ -n "$P12" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "::warning::MAC_CERTIFICATE_P12 not set — the mac build will be ad-hoc signed and not notarised."
+          fi
+
+      - name: Import macOS certificates
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          rm -f $RUNNER_TEMP/certificate.p12
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity in MAC_CERTIFICATE_P12"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+          echo "Signing as: $IDENTITY"
+          echo "IDENTITY=$IDENTITY" >> $GITHUB_ENV
+
+          # codesign --timestamp asks Apple's timestamp server, which now and
+          # then doesn't answer: "A timestamp was expected but was not
+          # found" failed v0.1.3360's Intel build, and its rerun published
+          # it after 3361 and 3362 (11-09). That one error is tried again;
+          # any other fails at once.
+          cat > "$RUNNER_TEMP/sign.sh" <<'EOF'
+          sign() {
+            local try out
+            for try in 1 2 3; do
+              if out=$(codesign "$@" 2>&1); then
+                [ -z "$out" ] || echo "$out"
+                return 0
+              fi
+              echo "$out" >&2
+              case "$out" in
+                *"timestamp was expected but was not found"*) ;;
+                *) return 1 ;;
+              esac
+              [ "$try" -lt 3 ] || return 1
+              echo "Apple's timestamp server didn't answer (try $try), signing again in $((try * 20))s"
+              sleep $((try * 20))
+            done
+          }
+          EOF
+
+      - name: Build magpie.app
+        run: make app VERSION="$VERSION"
+
+      - name: Sign magpie.app
+        run: |
+          if [ -n "$IDENTITY" ]; then
+            . "$RUNNER_TEMP/sign.sh"
+            sign --force --options runtime --timestamp --sign "$IDENTITY" magpie.app
+          else
+            codesign --force --sign - magpie.app
+          fi
+          codesign --verify --strict --verbose=2 magpie.app
+          codesign -dv --verbose=2 magpie.app 2>&1 | grep -E 'Authority|TeamIdentifier|flags|Identifier'
+
+      - name: Build dmg
+        run: |
+          DMG=magpie-darwin-${{ matrix.arch }}.dmg
+          mkdir -p $RUNNER_TEMP/dmg
+          cp -R magpie.app $RUNNER_TEMP/dmg/
+          ln -s /Applications $RUNNER_TEMP/dmg/Applications
+          # The Intel runners' hdiutil fails now and then with "create
+          # failed - Resource busy" while something still holds the image
+          # it makes; the release was lost each time (yetone/magpie#1846).
+          # The image's size is given, not left to hdiutil's guess from the
+          # folder: on the Intel runners the guess came out short and every
+          # try failed "No space left on device" copying magpie.app in
+          # (v0.1.1911, 1913, 1915, 1918 and 1921 lost on 10-28).
+          SIZE=$(( $(du -sm $RUNNER_TEMP/dmg | cut -f1) * 5 / 4 + 32 ))m
+          for try in 1 2 3 4 5; do
+            hdiutil create -volname magpie -srcfolder $RUNNER_TEMP/dmg -size $SIZE -ov -format UDZO "$DMG" && break
+            [ "$try" = 5 ] && exit 1
+            echo "hdiutil create failed (try $try), trying again"
+            rm -f "$DMG"
+            sleep $((try * 10))
+          done
+          if [ -n "$IDENTITY" ]; then
+            . "$RUNNER_TEMP/sign.sh"
+            sign --force --timestamp --sign "$IDENTITY" "$DMG"
+          fi
+          echo "DMG=$DMG" >> $GITHUB_ENV
+
+      - name: Notarise and staple
+        # notarytool's --timeout bounds only its wait for Apple: v0.1.3737's
+        # step hung past 90 minutes holding a macOS runner, and a job's own
+        # limit is six hours. 30m of waiting, the upload and stapling fit.
+        timeout-minutes: 45
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            echo "$APPLE_API_KEY_P8" > $RUNNER_TEMP/AuthKey.p8
+            AUTH=(--key $RUNNER_TEMP/AuthKey.p8 --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+          else
+            AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          fi
+          # The dmg's ticket covers the app inside it too, so one submission
+          # does for both: staple the dmg, and the app for the zip.
+          OUT=$(xcrun notarytool submit "$DMG" "${AUTH[@]}" --wait --timeout 30m --output-format json)
+          echo "$OUT"
+          ID=$(echo "$OUT" | jq -r .id)
+          STATUS=$(echo "$OUT" | jq -r .status)
+          if [ "$STATUS" != "Accepted" ]; then
+            xcrun notarytool log "$ID" "${AUTH[@]}" || true
+            rm -f $RUNNER_TEMP/AuthKey.p8
+            echo "::error::Notarisation $STATUS"
+            exit 1
+          fi
+          rm -f $RUNNER_TEMP/AuthKey.p8
+          # stapler fetches the ticket from Apple's CloudKit, which drops the
+          # connection now and then (error 68): try again, and if it is still
+          # down, ship the build unstapled. It is notarised (Accepted above),
+          # so Gatekeeper looks the ticket up online on first open; failing
+          # here left whole releases unpublished (#2778: v0.1.1284, 1385,
+          # 1386, 1541, 1824, 1827).
+          stapled=1
+          staple() {
+            for i in 1 2 3 4 5; do
+              xcrun stapler staple "$1" && return 0
+              echo "staple $1 failed (try $i), retrying in $((i * 20))s"
+              sleep $((i * 20))
+            done
+            echo "::warning::$1 ships notarised but unstapled: Apple's ticket service stayed unreachable"
+            stapled=0
+          }
+          staple "$DMG"
+          staple magpie.app
+          if [ "$stapled" = 1 ]; then
+            spctl --assess --type execute --verbose=2 magpie.app
+            spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+          else
+            # spctl would ask the same unreachable service; the signature is
+            # still checked, offline
+            codesign --verify --deep --strict --verbose=2 magpie.app
+            codesign --verify --strict --verbose=2 "$DMG"
+          fi
+
+      - name: Check the packaged binary
+        run: magpie.app/Contents/MacOS/magpie --version | grep -F "$VERSION"
+
+      - name: Zip magpie.app
+        run: ditto -c -k --keepParent magpie.app magpie-darwin-${{ matrix.arch }}.zip
+
+      - name: Remove signing keychain
+        if: always() && steps.signing.outputs.enabled == 'true'
+        run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: build-darwin-${{ matrix.arch }}
+          path: |
+            magpie-darwin-*.dmg
+            magpie-darwin-*.zip
+          if-no-files-found: error
+          retention-days: 2
+
+  # The terminal-only magpie (no GUI, no cgo) and the Windows app (WebView2,
+  # no cgo either) cross-compile from one runner.
+  cli:
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout magpie source code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: make release-windows VERSION="$VERSION"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: build-cli
+          path: |
+            dist/magpie-windows-*.exe
+          if-no-files-found: error
+          retention-days: 2
+
+  # Launch the Windows app for real: it has to come up and serve the gateway.
+  windows-check:
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    needs: [cli, prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: amd64
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: build-cli
+          path: dist
+
+      - name: Launch magpie
+        shell: pwsh
+        run: |
+          $exe = "dist\magpie-windows-${{ matrix.arch }}.exe"
+          $v = (& $exe --version | Out-String).Trim()
+          Write-Output $v
+          if ($v -notlike "magpie $env:VERSION*") { throw "unexpected version: $v" }
+          $log = "$env:RUNNER_TEMP\magpie"
+          $p = Start-Process -FilePath $exe -ArgumentList app -PassThru -RedirectStandardOutput "$log.out" -RedirectStandardError "$log.err"
+          function Fail($why) { Get-Content "$log.out", "$log.err" -ErrorAction SilentlyContinue; throw $why }
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            if ($p.HasExited) { Fail "magpie exited with $($p.ExitCode)" }
+            try { Invoke-WebRequest http://127.0.0.1:3425/v1/models -UseBasicParsing | Out-Null; $ok = $true; break } catch {}
+          }
+          if (-not $ok) { Fail "the gateway never answered" }
+          Start-Sleep -Seconds 5
+          if ($p.HasExited) { Fail "magpie exited with $($p.ExitCode)" }
+          Stop-Process -Id $p.Id
+          Write-Output "magpie ran and served the gateway"
+
+  publish:
+    needs: [prepare, verify, mac, windows-check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE: ${{ needs.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: dist
+      - name: Sign the installer inventory
+        env:
+          SIGNING_KEY: ${{ secrets.FORK_UPDATE_SIGNING_KEY }}
+        run: bash fork/sign.sh
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: dist/*
+      - name: Publish the complete release
+        run: python fork/publish.py
+  feed:
+    needs: publish
+    runs-on: ubuntu-latest
+    concurrency: fork-update-feed
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - run: python fork/feed.py
+        env:
+          GH_TOKEN: ${{ github.token }}

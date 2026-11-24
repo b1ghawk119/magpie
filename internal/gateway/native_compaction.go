@@ -1,20 +1,8 @@
 package gateway
 
-// Native compaction (#1099): a provider the user set to compact natively
-// (provider.Provider.NativeCompaction) is asked Codex's compaction_trigger
-// as Codex sent it, and the compaction item it writes back goes to Codex
-// as it came, sealed (encrypted_content), not as magpie's "magpie1:"
-// summary. Only the key or account that sealed it can read it again, so
-// magpie remembers who wrote each one (compactions.json, beside
-// affinity.json), and a later request carrying it goes only there — a
-// writer whose own list has since dropped the model included, tried as
-// the last resort an account whose list lacks the model is. When that one
-// can't be asked — switched off, removed, out of the group — the request
-// is refused, saying why: the compaction is never sent to another to be
-// refused, dropped (withoutCompaction), or summarised in its place, which
-// would lose the conversation's earlier context unasked. A call beside
-// the conversation (compactionAside: Codex's auto-review and the like),
-// which its writer doesn't serve, goes without it instead.
+// Native checkpoints retain writer provenance for affinity and recovery. A
+// conversation explicitly moved to another Responses provider can present the
+// original item there. A refusal can be recovered by asking its writer for text.
 
 import (
 	"bytes"
@@ -157,14 +145,7 @@ func (s *Server) keepsCompaction(from provider.Protocol, p provider.Provider, mo
 	if compactionTriggerIn(body) {
 		return true
 	}
-	if len(sealedCompactions(body)) == 0 {
-		return false
-	}
-	if p.CompactsOn(model) {
-		return true
-	}
-	cp, ok := checkpointOf(body)
-	return ok && cp.Provider == p.ID
+	return len(sealedCompactions(body)) != 0
 }
 
 // compactionAside is whether a call is one Codex makes beside the
@@ -217,6 +198,7 @@ func foreignToSignin(body []byte) (checkpointWriter, bool) {
 // checkpointWriter is who sealed a compaction: the key or account
 // (candidate.who), its provider and the model it answered as.
 type checkpointWriter struct {
+	Recovery []byte    `json:"recovery,omitempty"`
 	Who      string    `json:"who"`
 	Provider string    `json:"provider"`
 	Model    string    `json:"model,omitempty"`
@@ -302,10 +284,14 @@ func checkpointOf(body []byte) (checkpointWriter, bool) {
 
 // wroteCheckpoint remembers that c sealed the compaction enc.
 func wroteCheckpoint(enc string, c candidate) {
+	writeCheckpointRecovery(enc, c, nil)
+}
+
+func writeCheckpointRecovery(enc string, c candidate, recovery []byte) {
 	now := time.Now()
 	checkpoints.Lock()
 	checkpointFor(enc) // the file's, read in first so the write keeps them
-	checkpoints.m[checkpointKey(enc)] = checkpointWriter{Who: c.who(), Provider: c.p.ID, Model: c.model, At: now}
+	checkpoints.m[checkpointKey(enc)] = checkpointWriter{Who: c.who(), Provider: c.p.ID, Model: c.model, At: now, Recovery: recovery}
 	checkpoints.Unlock()
 	saveCheckpoints()
 }
@@ -322,12 +308,22 @@ func saveCheckpoints() {
 	var ks []kept
 	checkpoints.Lock()
 	for k, v := range checkpoints.m {
-		if time.Since(v.At) <= checkpointKeep {
-			ks = append(ks, kept{k, v})
+		if time.Since(v.At) > checkpointKeep {
+			delete(checkpoints.m, k)
+			continue
+		}
+		ks = append(ks, kept{k, v})
+	}
+	slices.SortFunc(ks, func(a, b kept) int { return b.v.At.Compare(a.v.At) })
+	for i := range ks {
+		if i >= checkpointsKept {
+			delete(checkpoints.m, ks[i].k)
+		} else if i >= 128 && len(ks[i].v.Recovery) > 0 {
+			ks[i].v.Recovery = nil
+			checkpoints.m[ks[i].k] = ks[i].v
 		}
 	}
 	checkpoints.Unlock()
-	slices.SortFunc(ks, func(a, b kept) int { return b.v.At.Compare(a.v.At) })
 	ks = ks[:min(len(ks), checkpointsKept)]
 	out := make(map[string]checkpointWriter, len(ks))
 	for _, k := range ks {
@@ -464,11 +460,11 @@ func checkpointError(model string, cp checkpointWriter) string {
 		what = "key"
 	}
 	why, fix := checkpointGone(model, what, cp)
-	msg := fmt.Sprintf("This conversation was compacted natively by %s: the compaction is sealed (encrypted) to that %s, and no other key or account can read it. The request for %s can't go to it now: %s. magpie doesn't send the compaction to another, which would refuse it, nor drop it or summarise it in its place, which would lose the conversation's earlier context. To go on with this conversation, %s; or start a new conversation.",
+	msg := fmt.Sprintf("This conversation was compacted natively by %s: the compaction is sealed (encrypted) to that %s, which can recover its earlier context. The request for %s can't go to it now: %s. This route has no eligible native reader. You can also select a compatible Responses provider. To go on with this conversation, %s; or start a new conversation.",
 		cp.Who, what, model, why, fix)
 	if p, err := provider.Find(cp.Provider); err == nil {
 		if p.NativeCompaction {
-			msg += fmt.Sprintf(" Native compaction is on for %s, so each conversation it compacts is held to the %s that compacted it; turned off (the provider's Compaction row), magpie summarises instead, which any of them can read.", p.ID, what)
+			msg += fmt.Sprintf(" Native compaction is on for %s, so the original %s is recorded for recovery; turned off (the provider's Compaction row), magpie summarises instead, which any of them can read.", p.ID, what)
 		} else {
 			msg += fmt.Sprintf(" Native compaction is off for %s now, so a compaction magpie routes among its %ss is magpie's summary, which any of them can read.", p.ID, what)
 		}

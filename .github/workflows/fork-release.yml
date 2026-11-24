@@ -43,6 +43,11 @@ jobs:
           go-version-file: go.mod
       - run: go test -tags nogui ./internal/gateway -run 'TestNativeCompaction|TestCrossProvider|TestForeignCompaction'
       - run: go test -tags nogui ./internal/update -run 'TestAttestation|TestDownloadRefusedWithoutAttestation|TestImageIsTheReleasesOwnTag|TestEmbeddedKey|TestForkRevision'
+      - name: Verify native checkpoint route details on the merged release
+        run: |
+          npm install --prefix "$RUNNER_TEMP/route-ui" --no-audit --no-fund playwright@1.61.0
+          "$RUNNER_TEMP/route-ui/node_modules/.bin/playwright" install --with-deps chromium webkit
+          NODE_PATH="$RUNNER_TEMP/route-ui/node_modules" node --test internal/gui/tests/routing-compaction.test.cjs
   mac:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}

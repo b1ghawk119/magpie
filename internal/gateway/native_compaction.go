@@ -163,8 +163,8 @@ func (s *Server) keepsCompaction(from provider.Protocol, p provider.Provider, mo
 	if p.CompactsOn(model) {
 		return true
 	}
-	cp, ok := checkpointOf(body)
-	return ok && cp.Provider == p.ID
+	_, ok := checkpointOf(body)
+	return ok
 }
 
 // compactionAside is whether a call is one Codex makes beside the

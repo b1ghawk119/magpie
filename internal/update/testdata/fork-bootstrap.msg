@@ -1,0 +1,7 @@
+magpie release 0.1.4735+hawk.1
+2b8d422098db7cb682da0e78cfb7b41e736b5703bb4cdf3a7daa1a6f03a334cd  magpie-darwin-amd64.dmg
+a4aec53cbe4dfe36881c84918fadbfa281740d4307e60eceeefa819290683bb3  magpie-darwin-amd64.zip
+feca3861fe6770e43487f3171c807991ce6c7b945bbd7f5e1eacfa9dceaa1a7e  magpie-darwin-arm64.dmg
+c5a8508c3a3f8bde8af9d7c7a40ff1d25d402a2245f6afbbcb344344c399804a  magpie-darwin-arm64.zip
+febd67b339e9fc2e44f69d8ac7f91e21f57a88267e26dbbde0794bd22b46bc6e  magpie-windows-amd64.exe
+3b63da4861b7699c83354bdfa1ffe9087b48a5277bbfe6947c8aeac935a74fbd  magpie-windows-arm64.exe

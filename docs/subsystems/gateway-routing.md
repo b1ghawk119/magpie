@@ -1,5 +1,8 @@
 # Gateway routing and fallback
 
+The desktop fork's cross-provider checkpoint recovery is documented in the [fork guide](../../fork/README.zh-CN.md). A known unreadable checkpoint can be retried with a bounded local transcript excerpt even when its writer is unavailable. [Recovery implementation](../../internal/gateway/checkpoint_offline.go)
+
+
 The gateway is magpie's local LLM endpoint (`127.0.0.1:3425` by default). It
 serves Chat Completions, Responses, Anthropic Messages and Gemini. It finds
 the provider, key or account and model for each request. When the upstream
@@ -40,6 +43,10 @@ user changed or removed gets none. With no provider serving the model the
 request is still 404, and `unknownModel` says the model is gone and to pick
 another for the conversation instead of listing every id
 (`provider.GoneAutoGroup`; canlee886 on X, `TestFoundGroupGoneGoesToItsModel`).
+
+## Cross-provider native checkpoints (downstream)
+
+A main conversation explicitly routed away from its checkpoint writer tries the available Responses carriers in its chosen route with the original item. An explicit destination with a ready native carrier can be used even when the old writer is a configured fallback. A routing group retains its known writer when available. Generation still follows the provider's native compaction setting. On an identified encrypted-content failure before client output, the gateway can ask the recorded writer for a text summary of its checkpoint alone and replay the turn on the destination. An incomplete export leaves the upstream error visible. The export follows normal model and account authorization. See `internal/gateway/checkpoint_transfer.go` and `TestCrossProviderUsesWriterSummaryAfterRejection`.
 
 ## Responsibilities and sources of truth
 

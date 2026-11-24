@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory() as tmp:
     git('config', 'credential.https://github.com.helper', '!gh auth git-credential')
     if git('ls-remote', '--heads', 'origin', 'update-feed'):
         git('fetch', '--depth=1', 'origin', 'update-feed')
-        git('reset', '--keep', 'FETCH_HEAD')
+        git('checkout', '-B', 'update-feed', 'FETCH_HEAD')
     git('config', 'user.name', 'Magpie release bot')
     git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
     def write(name, obj):

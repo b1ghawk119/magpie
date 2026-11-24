@@ -116,7 +116,7 @@ func TestNativeCompactionRefusalGoesBack(t *testing.T) {
 // A compaction one key sealed never goes to another provider, which would
 // refuse it, nor goes without it: the request is answered an error saying
 // why. The writer, asked again, still reads it.
-func TestNativeCompactionStaysWithItsWriter(t *testing.T) {
+func TestNativeCompactionCrossesResponsesProviders(t *testing.T) {
 	f := &fake{t: t, reply: nativeSealedReply("gAAAAB-sealed-by-a")}
 	setup(t, provider.Responses, f)
 	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
@@ -133,11 +133,8 @@ func TestNativeCompactionStaysWithItsWriter(t *testing.T) {
 	}
 	next := `{"model":"%s","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAB-sealed-by-a"},{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
 	code, body := nativeAsk(t, "other/m1", next)
-	if code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "fake#") {
-		t.Fatalf("another provider: %d %s", code, body)
-	}
-	if g.calls != 0 {
-		t.Errorf("the other provider was sent it: %s", g.got)
+	if code != 200 || g.calls != 1 || !strings.Contains(string(g.got), "gAAAAB-sealed-by-a") {
+		t.Fatalf("cross-provider: %d %s; got %s", code, body, g.got)
 	}
 	f.reply = g.reply
 	if code, body := nativeAsk(t, "fake/m1", next); code != 200 || !strings.Contains(string(f.got), "gAAAAB-sealed-by-a") {
@@ -252,24 +249,15 @@ func TestNativeCompactionFallbackSealStaysWithItsWriter(t *testing.T) {
 	// provider that doesn't search translated
 	next := `{"model":"%s","stream":true,"tools":[{"type":"web_search"}],"input":[{"type":"compaction","encrypted_content":"gAAAAB-sealed-by-fb"},{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
 	code, body = nativeAsk(t, "other/m1", next)
-	if code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "fb#") {
-		t.Fatalf("another provider: %d %s\nother got %s", code, body, other.got)
+	if code != 200 || other.calls != 1 || !strings.Contains(string(other.got), "gAAAAB-sealed-by-fb") {
+		t.Fatalf("cross-provider without native generation: %d %s; got %s", code, body, other.got)
 	}
-	if strings.Contains(body, "native compaction is on") {
-		t.Errorf("says native compaction is on for its writer, whose isn't: %s", body)
-	}
-	if other.calls != 0 {
-		t.Errorf("the other provider was asked: %s", other.got)
-	}
-
 	fb.reply = done
+	noRests() // FA is available again for the explicit switch.
 	fa.got, fb.got = nil, nil
 	code, body = nativeAsk(t, "fa/m1", next)
-	if code != 200 || !strings.Contains(string(fb.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) {
-		t.Errorf("the writer: %d %s\nfb got %s", code, body, fb.got)
-	}
-	if strings.Contains(string(fa.got), "gAAAAB-sealed-by-fb") {
-		t.Errorf("fa, which can't read it, was sent it: %s", fa.got)
+	if code != 200 || !strings.Contains(string(fa.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) || fb.got != nil {
+		t.Fatalf("explicit route with writer as fallback: %d %s; primary %s, writer %s", code, body, fa.got, fb.got)
 	}
 }
 
@@ -1075,10 +1063,10 @@ func TestForeignCompactionLeftOutOfAutoReview(t *testing.T) {
 			t.Errorf("OpenAI was sent Copilot's seal: %q", openai)
 		}
 	})
-	t.Run("a turn on another provider's model is refused as before", func(t *testing.T) {
+	t.Run("a turn on another Responses provider carries its seal", func(t *testing.T) {
 		calls := g.calls
 		code, body := ask("/responses", "other/m1", "")
-		if code != 400 || !strings.Contains(body, "compacted natively") || g.calls != calls {
+		if code != 200 || !strings.Contains(string(g.got), seal) || g.calls != calls+1 {
 			t.Errorf("%d %s", code, body)
 		}
 	})
@@ -1090,4 +1078,33 @@ func TestForeignCompactionLeftOutOfAutoReview(t *testing.T) {
 			t.Errorf("%d %s", code, body)
 		}
 	})
+}
+
+func TestCrossProviderUsesWriterSummaryAfterRejection(t *testing.T) {
+	const seal = "gAAAAB-exchange"
+	source := &fake{t: t, reply: nativeSealedReply(seal)}
+	setup(t, provider.Responses, source)
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
+	nativeOn(t, "fake")
+	if status, _ := nativeAsk(t, "fake/m1", compactTurn); status != 200 {
+		t.Fatal(status)
+	}
+	source.reply = sse(`data: {"type":"response.completed","response":{"id":"summary","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"original checkpoint detail"}]}]}}`)
+	target := &fake{t: t, reply: sse(`data: {"type":"response.completed","response":{"id":"done","status":"completed","output":[]}}`)}
+	target.refuse = func(body []byte) (int, string) {
+		if strings.Contains(string(body), seal) {
+			return 400, `{"error":{"code":"invalid_encrypted_content","message":"could not decrypt encrypted content"}}`
+		}
+		return 0, ""
+	}
+	up := httptest.NewServer(target)
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "target", Name: "Target", Key: "k", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	next := `{"model":"%s","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAB-exchange"},{"type":"message","role":"user","content":"private new turn"}]}`
+	code, b := nativeAsk(t, "target/m1", next)
+	if code != 200 || target.calls != 2 || source.calls != 2 || !strings.Contains(string(target.got), "original checkpoint detail") || !strings.Contains(string(target.got), "private new turn") || strings.Contains(string(source.got), "private new turn") {
+		t.Fatalf("code %d %s; source %d %s; target %d %s", code, b, source.calls, source.got, target.calls, target.got)
+	}
 }

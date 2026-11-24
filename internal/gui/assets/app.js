@@ -10741,7 +10741,7 @@ function nativeCompactionField(show) {
   const [ntk, ncb] = tick(t("Codex compacts on this provider"), !!draft.nativeCompaction);
   ntk.classList.add("native-compaction");
   ncb.onchange = () => { draft.nativeCompaction = ncb.checked; };
-  const row = field(t("Compaction"), ntk, t("Codex's compaction is asked of this provider as Codex sent it, and the summary it seals goes back to Codex unchanged. Off, magpie writes the summary. A conversation compacted this way continues only on this provider and account: another is refused with an error, never sent without the context."), t("A conversation compacted this way continues only on this provider and account."));
+  const row = field(t("Compaction"), ntk, t("When enabled, Codex receives the native compaction item from this provider. When disabled, magpie writes a text summary."), t("When you switch providers, magpie first tries the original item on a compatible route."));
   const refresh = () => { for (const e of row) e.style.display = show() ? "" : "none"; };
   refresh();
   return [row, refresh];

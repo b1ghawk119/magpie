@@ -116,7 +116,7 @@ func TestNativeCompactionRefusalGoesBack(t *testing.T) {
 // A compaction one key sealed never goes to another provider, which would
 // refuse it, nor goes without it: the request is answered an error saying
 // why. The writer, asked again, still reads it.
-func TestNativeCompactionStaysWithItsWriter(t *testing.T) {
+func TestNativeCompactionCrossesResponsesProviders(t *testing.T) {
 	f := &fake{t: t, reply: nativeSealedReply("gAAAAB-sealed-by-a")}
 	setup(t, provider.Responses, f)
 	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
@@ -133,11 +133,8 @@ func TestNativeCompactionStaysWithItsWriter(t *testing.T) {
 	}
 	next := `{"model":"%s","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAB-sealed-by-a"},{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
 	code, body := nativeAsk(t, "other/m1", next)
-	if code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "fake#") {
-		t.Fatalf("another provider: %d %s", code, body)
-	}
-	if g.calls != 0 {
-		t.Errorf("the other provider was sent it: %s", g.got)
+	if code != 200 || g.calls != 1 || !strings.Contains(string(g.got), "gAAAAB-sealed-by-a") {
+		t.Fatalf("cross-provider: %d %s; got %s", code, body, g.got)
 	}
 	f.reply = g.reply
 	if code, body := nativeAsk(t, "fake/m1", next); code != 200 || !strings.Contains(string(f.got), "gAAAAB-sealed-by-a") {
@@ -252,24 +249,15 @@ func TestNativeCompactionFallbackSealStaysWithItsWriter(t *testing.T) {
 	// provider that doesn't search translated
 	next := `{"model":"%s","stream":true,"tools":[{"type":"web_search"}],"input":[{"type":"compaction","encrypted_content":"gAAAAB-sealed-by-fb"},{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
 	code, body = nativeAsk(t, "other/m1", next)
-	if code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "fb#") {
-		t.Fatalf("another provider: %d %s\nother got %s", code, body, other.got)
+	if code != 200 || other.calls != 1 || !strings.Contains(string(other.got), "gAAAAB-sealed-by-fb") {
+		t.Fatalf("cross-provider without native generation: %d %s; got %s", code, body, other.got)
 	}
-	if strings.Contains(body, "native compaction is on") {
-		t.Errorf("says native compaction is on for its writer, whose isn't: %s", body)
-	}
-	if other.calls != 0 {
-		t.Errorf("the other provider was asked: %s", other.got)
-	}
-
 	fb.reply = done
+	noRests() // FA is available again for the explicit switch.
 	fa.got, fb.got = nil, nil
 	code, body = nativeAsk(t, "fa/m1", next)
-	if code != 200 || !strings.Contains(string(fb.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) {
-		t.Errorf("the writer: %d %s\nfb got %s", code, body, fb.got)
-	}
-	if strings.Contains(string(fa.got), "gAAAAB-sealed-by-fb") {
-		t.Errorf("fa, which can't read it, was sent it: %s", fa.got)
+	if code != 200 || !strings.Contains(string(fa.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) || fb.got != nil {
+		t.Fatalf("explicit route with writer as fallback: %d %s; primary %s, writer %s", code, body, fa.got, fb.got)
 	}
 }
 
@@ -1075,10 +1063,10 @@ func TestForeignCompactionLeftOutOfAutoReview(t *testing.T) {
 			t.Errorf("OpenAI was sent Copilot's seal: %q", openai)
 		}
 	})
-	t.Run("a turn on another provider's model is refused as before", func(t *testing.T) {
+	t.Run("a turn on another Responses provider carries its seal", func(t *testing.T) {
 		calls := g.calls
 		code, body := ask("/responses", "other/m1", "")
-		if code != 400 || !strings.Contains(body, "compacted natively") || g.calls != calls {
+		if code != 200 || !strings.Contains(string(g.got), seal) || g.calls != calls+1 {
 			t.Errorf("%d %s", code, body)
 		}
 	})
@@ -1090,4 +1078,88 @@ func TestForeignCompactionLeftOutOfAutoReview(t *testing.T) {
 			t.Errorf("%d %s", code, body)
 		}
 	})
+}
+
+func TestCrossProviderUsesWriterSummaryAfterRejection(t *testing.T) {
+	const seal = "gAAAAB-exchange"
+	source := &fake{t: t, reply: nativeSealedReply(seal)}
+	setup(t, provider.Responses, source)
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
+	nativeOn(t, "fake")
+	if status, _ := nativeAsk(t, "fake/m1", compactTurn); status != 200 {
+		t.Fatal(status)
+	}
+	source.reply = sse(`data: {"type":"response.completed","response":{"id":"summary","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"original checkpoint detail"}]}]}}`)
+	target := &fake{t: t, reply: sse(`data: {"type":"response.completed","response":{"id":"done","status":"completed","output":[]}}`)}
+	target.refuse = func(body []byte) (int, string) {
+		if strings.Contains(string(body), seal) {
+			return 400, `{"error":{"code":"invalid_encrypted_content","message":"could not decrypt encrypted content"}}`
+		}
+		return 0, ""
+	}
+	up := httptest.NewServer(target)
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "target", Name: "Target", Key: "k", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	next := `{"model":"%s","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAB-exchange"},{"type":"message","role":"user","content":"private new turn"}]}`
+	// A fresh checkpoint survives a process restart. The writer is out of credit.
+	onDisk, err := os.ReadFile(checkpointsPath())
+	if err != nil || strings.Contains(string(onDisk), "fix the bug") {
+		t.Fatal("checkpoint excerpt was not stored privately")
+	}
+	checkpoints.Lock()
+	checkpoints.from = ""
+	checkpoints.m = map[string]checkpointWriter{}
+	checkpoints.mod = time.Time{}
+	checkpoints.Unlock()
+	source.refuse = func([]byte) (int, string) { return 402, `{"error":{"message":"balance exhausted"}}` }
+	status, reply := nativeAsk(t, "target/m1", next)
+	if status != 200 || target.calls != 2 || source.calls != 1 || !strings.Contains(string(target.got), "fix the bug") || !strings.Contains(string(target.got), "private new turn") || strings.Contains(string(target.got), seal) {
+		t.Fatalf("offline retry %d %s source=%d target=%d body=%s", status, reply, source.calls, target.calls, target.got)
+	}
+	// A checkpoint from a release that stored only writer provenance.
+	checkpoints.Lock()
+	cp, _ := checkpointFor(seal)
+	cp.Recovery = nil
+	checkpoints.m[checkpointKey(seal)] = cp
+	checkpoints.Unlock()
+	saveCheckpoints()
+	source.refuse = nil
+	target.calls = 0
+	code, b := nativeAsk(t, "target/m1", next)
+	if code != 200 || target.calls != 2 || source.calls != 2 || !strings.Contains(string(target.got), "original checkpoint detail") || !strings.Contains(string(target.got), "private new turn") || strings.Contains(string(source.got), "private new turn") {
+		t.Fatalf("code %d %s; source %d %s; target %d %s", code, b, source.calls, source.got, target.calls, target.got)
+	}
+	source.refuse = func([]byte) (int, string) { return 402, `{"error":{"message":"balance exhausted"}}` }
+	status, reply = nativeAsk(t, "target/m1", next)
+	if status != 200 || !strings.Contains(string(target.got), "earlier encrypted history is unavailable") || !strings.Contains(string(target.got), "private new turn") {
+		t.Fatalf("legacy unavailable writer: %d %s, got %s", status, reply, target.got)
+	}
+}
+
+func TestCrossProviderOfflineHistoryBoundaries(t *testing.T) {
+	const thread = "00000000-0000-4000-8000-000000000001"
+	const enc = "opaque-example-1"
+	scope := []byte("caller\x00thread")
+	raw := []byte(`{"input":[{"role":"developer","content":"hidden instructions"},{"role":"user","content":"keep the early goal"},{"type":"function_call_output","output":"test passed"}]}`)
+	cp := checkpointWriter{Recovery: prepareExcerpt(raw, enc, scope)}
+	if got := openExcerpt(cp, enc, scope); !strings.Contains(got, "early goal") || !strings.Contains(got, "test passed") || strings.Contains(got, "hidden instructions") {
+		t.Fatal(got)
+	}
+	if openExcerpt(cp, enc, []byte("other thread")) != "" || openExcerpt(cp, "other seal", scope) != "" {
+		t.Fatal("read outside checkpoint scope")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "thread.jsonl")
+	lines := []string{`{"type":"session_meta","payload":{"id":"` + thread + `"}}`, `{"type":"response_item","payload":{"role":"assistant","content":"boundary detail"}}`, `{"type":"compacted","payload":{"replacement_history":[{"type":"compaction","encrypted_content":"` + enc + `"}]}}`, `{"type":"response_item","payload":{"role":"user","content":"future message"}}`}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if text := readRolloutExcerpt(t.Context(), path, thread, enc); !strings.Contains(text, "boundary detail") || strings.Contains(text, "future message") {
+		t.Fatal(text)
+	}
+	if readRolloutExcerpt(t.Context(), path, thread, "other") != "" || readRolloutExcerpt(t.Context(), path, "other", enc) != "" {
+		t.Fatal("unmatched rollout used")
+	}
 }

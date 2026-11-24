@@ -16,17 +16,15 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// The fixture is usemagpie.ai/files/v0.1.3986/attestations.jsonl as the
-// site served it on 2026-11-13, byte for byte: one bundle whose statement
-// names all 17 files of the release.
+// The fixture is the signed bootstrap release bundle in site JSONL format.
 const (
-	siteTag    = "v0.1.3986"
-	siteDigest = "55036e99a685f7ffa844124a4f5ded0a2dc8bc93edeb6b3b5449eb520d8ff1ed" // magpie-cli-android-arm64
+	siteTag    = "v0.1.4735+hawk.1"
+	siteDigest = "febd67b339e9fc2e44f69d8ac7f91e21f57a88267e26dbbde0794bd22b46bc6e" // magpie-windows-amd64.exe
 )
 
 func siteFixture(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "attest", "attestations-"+siteTag+".jsonl"))
+	b, err := os.ReadFile(filepath.Join("testdata", "attest", "fork-bootstrap.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +33,7 @@ func siteFixture(t *testing.T) []byte {
 
 // siteAsset is a file the feed names on the site, as the feed gives it.
 func siteAsset(digest string) Asset {
-	return Asset{URL: Site + "/files/" + siteTag + "/magpie-cli-android-arm64", SHA256: digest, attest: true}
+	return Asset{URL: Site + "/files/" + siteTag + "/magpie-windows-amd64.exe", SHA256: digest, attest: true}
 }
 
 // siteServer stands in for usemagpie.ai's /files/<tag>/attestations.jsonl:
@@ -99,7 +97,7 @@ func tamperedLines(t *testing.T, jsonl []byte) []byte {
 func TestAttestationFromTheSite(t *testing.T) {
 	gh := attestServer(t, 404, nil)
 	site := siteServer(t, serves(siteFixture(t)))
-	if err := attestedFile(context.Background(), siteAsset(siteDigest), "magpie-cli-android-arm64"); err != nil {
+	if err := attestedFile(context.Background(), siteAsset(siteDigest), "magpie-windows-amd64.exe"); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(site); n != 1 {
@@ -206,7 +204,7 @@ func TestAttestationSiteTamperedRefused(t *testing.T) {
 		attestServer(t, c.code, c.body)
 		siteServer(t, serves(bad))
 		withSource(t, c.src)
-		err := attestedFile(context.Background(), siteAsset(siteDigest), "magpie-cli-android-arm64")
+		err := attestedFile(context.Background(), siteAsset(siteDigest), "magpie-windows-amd64.exe")
 		if !errors.Is(err, errUnattested) || !strings.Contains(err.Error(), "not installed") {
 			t.Errorf("%s: got %v", name, err)
 		}

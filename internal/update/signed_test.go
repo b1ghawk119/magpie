@@ -129,11 +129,11 @@ func TestUnsignedEraNeedsNoSignature(t *testing.T) {
 // the private key (UPDATE_SIGNING_KEY) with openssl, as the workflow does.
 func TestEmbeddedKeyVerifiesCIsSignature(t *testing.T) {
 	pub, _ := base64.StdEncoding.DecodeString(signingKey)
-	msg, err := os.ReadFile("testdata/signed-sample.msg")
+	msg, err := os.ReadFile("testdata/fork-bootstrap.msg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile("testdata/signed-sample.sig")
+	b, _ := os.ReadFile("testdata/fork-bootstrap.sig")
 	sig, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 	if !ed25519.Verify(pub, msg, sig) {
 		t.Fatal("the embedded key does not verify CI's signature")

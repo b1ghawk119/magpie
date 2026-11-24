@@ -17,16 +17,16 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// The fixture is the answer api.github.com gave on 2026-11-12 for the
-// SHA256SUMS of v0.1.3925 in yetone/magpie-releases, byte for byte.
+// The fixture is the answer api.github.com gave on 2026-11-24 for the
+// SHA256SUMS of v0.1.4735+hawk.1 in this fork, byte for byte.
 const (
-	attestedSums = "9fbb3e07c679a0a9c391305fde380d27eb61726bf28f4b078b2100f28379ce14"
+	attestedSums = "91b2c7eaa1b0da7e0998dd2b0b37e45107859df0b5a9bcb1f9336799772595f8"
 	otherDigest  = "0000000000000000000000000000000000000000000000000000000000000001"
 )
 
 func attestFixture(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "attest", "sums-v0.1.3925.json"))
+	b, err := os.ReadFile(filepath.Join("testdata", "attest", "fork-bootstrap.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func attestServer(t *testing.T, code int, body []byte) *int32 {
 	var asks int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&asks, 1)
-		if !strings.HasPrefix(r.URL.Path, "/repos/yetone/magpie-releases/attestations/sha256:") {
+		if !strings.HasPrefix(r.URL.Path, "/repos/"+attestRepo+"/attestations/sha256:") {
 			t.Errorf("asked %s", r.URL.Path)
 		}
 		w.WriteHeader(code)

@@ -1103,8 +1103,63 @@ func TestCrossProviderUsesWriterSummaryAfterRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := `{"model":"%s","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAB-exchange"},{"type":"message","role":"user","content":"private new turn"}]}`
+	// A fresh checkpoint survives a process restart. The writer is out of credit.
+	onDisk, err := os.ReadFile(checkpointsPath())
+	if err != nil || strings.Contains(string(onDisk), "fix the bug") {
+		t.Fatal("checkpoint excerpt was not stored privately")
+	}
+	checkpoints.Lock()
+	checkpoints.from = ""
+	checkpoints.m = map[string]checkpointWriter{}
+	checkpoints.mod = time.Time{}
+	checkpoints.Unlock()
+	source.refuse = func([]byte) (int, string) { return 402, `{"error":{"message":"balance exhausted"}}` }
+	status, reply := nativeAsk(t, "target/m1", next)
+	if status != 200 || target.calls != 2 || source.calls != 1 || !strings.Contains(string(target.got), "fix the bug") || !strings.Contains(string(target.got), "private new turn") || strings.Contains(string(target.got), seal) {
+		t.Fatalf("offline retry %d %s source=%d target=%d body=%s", status, reply, source.calls, target.calls, target.got)
+	}
+	// A checkpoint from a release that stored only writer provenance.
+	checkpoints.Lock()
+	cp, _ := checkpointFor(seal)
+	cp.Recovery = nil
+	checkpoints.m[checkpointKey(seal)] = cp
+	checkpoints.Unlock()
+	saveCheckpoints()
+	source.refuse = nil
+	target.calls = 0
 	code, b := nativeAsk(t, "target/m1", next)
 	if code != 200 || target.calls != 2 || source.calls != 2 || !strings.Contains(string(target.got), "original checkpoint detail") || !strings.Contains(string(target.got), "private new turn") || strings.Contains(string(source.got), "private new turn") {
 		t.Fatalf("code %d %s; source %d %s; target %d %s", code, b, source.calls, source.got, target.calls, target.got)
+	}
+	source.refuse = func([]byte) (int, string) { return 402, `{"error":{"message":"balance exhausted"}}` }
+	status, reply = nativeAsk(t, "target/m1", next)
+	if status != 200 || !strings.Contains(string(target.got), "earlier encrypted history is unavailable") || !strings.Contains(string(target.got), "private new turn") {
+		t.Fatalf("legacy unavailable writer: %d %s, got %s", status, reply, target.got)
+	}
+}
+
+func TestCrossProviderOfflineHistoryBoundaries(t *testing.T) {
+	const thread = "00000000-0000-4000-8000-000000000001"
+	const enc = "opaque-example-1"
+	scope := []byte("caller\x00thread")
+	raw := []byte(`{"input":[{"role":"developer","content":"hidden instructions"},{"role":"user","content":"keep the early goal"},{"type":"function_call_output","output":"test passed"}]}`)
+	cp := checkpointWriter{Recovery: prepareExcerpt(raw, enc, scope)}
+	if got := openExcerpt(cp, enc, scope); !strings.Contains(got, "early goal") || !strings.Contains(got, "test passed") || strings.Contains(got, "hidden instructions") {
+		t.Fatal(got)
+	}
+	if openExcerpt(cp, enc, []byte("other thread")) != "" || openExcerpt(cp, "other seal", scope) != "" {
+		t.Fatal("read outside checkpoint scope")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "thread.jsonl")
+	lines := []string{`{"type":"session_meta","payload":{"id":"` + thread + `"}}`, `{"type":"response_item","payload":{"role":"assistant","content":"boundary detail"}}`, `{"type":"compacted","payload":{"replacement_history":[{"type":"compaction","encrypted_content":"` + enc + `"}]}}`, `{"type":"response_item","payload":{"role":"user","content":"future message"}}`}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if text := readRolloutExcerpt(t.Context(), path, thread, enc); !strings.Contains(text, "boundary detail") || strings.Contains(text, "future message") {
+		t.Fatal(text)
+	}
+	if readRolloutExcerpt(t.Context(), path, thread, "other") != "" || readRolloutExcerpt(t.Context(), path, "other", enc) != "" {
+		t.Fatal("unmatched rollout used")
 	}
 }

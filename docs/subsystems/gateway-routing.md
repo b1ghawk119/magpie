@@ -1,5 +1,8 @@
 # Gateway routing and fallback
 
+The desktop fork's cross-provider checkpoint recovery is documented in the [fork guide](../../fork/README.zh-CN.md). A known unreadable checkpoint can be retried with a bounded local transcript excerpt even when its writer is unavailable. [Recovery implementation](../../internal/gateway/checkpoint_offline.go)
+
+
 The gateway is magpie's local LLM endpoint (`127.0.0.1:3425` by default). It
 serves Chat Completions, Responses, Anthropic Messages and Gemini. It finds
 the provider, key or account and model for each request. When the upstream

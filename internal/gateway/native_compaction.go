@@ -198,6 +198,7 @@ func foreignToSignin(body []byte) (checkpointWriter, bool) {
 // checkpointWriter is who sealed a compaction: the key or account
 // (candidate.who), its provider and the model it answered as.
 type checkpointWriter struct {
+	Recovery []byte    `json:"recovery,omitempty"`
 	Who      string    `json:"who"`
 	Provider string    `json:"provider"`
 	Model    string    `json:"model,omitempty"`
@@ -283,10 +284,14 @@ func checkpointOf(body []byte) (checkpointWriter, bool) {
 
 // wroteCheckpoint remembers that c sealed the compaction enc.
 func wroteCheckpoint(enc string, c candidate) {
+	writeCheckpointRecovery(enc, c, nil)
+}
+
+func writeCheckpointRecovery(enc string, c candidate, recovery []byte) {
 	now := time.Now()
 	checkpoints.Lock()
 	checkpointFor(enc) // the file's, read in first so the write keeps them
-	checkpoints.m[checkpointKey(enc)] = checkpointWriter{Who: c.who(), Provider: c.p.ID, Model: c.model, At: now}
+	checkpoints.m[checkpointKey(enc)] = checkpointWriter{Who: c.who(), Provider: c.p.ID, Model: c.model, At: now, Recovery: recovery}
 	checkpoints.Unlock()
 	saveCheckpoints()
 }
@@ -303,12 +308,22 @@ func saveCheckpoints() {
 	var ks []kept
 	checkpoints.Lock()
 	for k, v := range checkpoints.m {
-		if time.Since(v.At) <= checkpointKeep {
-			ks = append(ks, kept{k, v})
+		if time.Since(v.At) > checkpointKeep {
+			delete(checkpoints.m, k)
+			continue
+		}
+		ks = append(ks, kept{k, v})
+	}
+	slices.SortFunc(ks, func(a, b kept) int { return b.v.At.Compare(a.v.At) })
+	for i := range ks {
+		if i >= checkpointsKept {
+			delete(checkpoints.m, ks[i].k)
+		} else if i >= 128 && len(ks[i].v.Recovery) > 0 {
+			ks[i].v.Recovery = nil
+			checkpoints.m[ks[i].k] = ks[i].v
 		}
 	}
 	checkpoints.Unlock()
-	slices.SortFunc(ks, func(a, b kept) int { return b.v.At.Compare(a.v.At) })
 	ks = ks[:min(len(ks), checkpointsKept)]
 	out := make(map[string]checkpointWriter, len(ks))
 	for _, k := range ks {

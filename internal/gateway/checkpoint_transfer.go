@@ -18,13 +18,13 @@ type exporterOnly struct{}
 // exportCheckpoint asks the writer to describe just its own opaque item. Later
 // user turns and tool results stay on the chosen route. Multiple seals require
 // separate provenance and are left intact rather than folded speculatively.
-func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpointWriter) ([]byte, bool) {
+func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpointWriter) (string, bool) {
 	seals := sealedCompactions(body)
 	if writer.Model == "" || len(seals) != 1 {
-		return nil, false
+		return "", false
 	}
 	input := compactInput(body)
-	for i, item := range input {
+	for _, item := range input {
 		if gjson.GetBytes(item, "encrypted_content").Str != seals[0] || !isCheckpointItem(item) {
 			continue
 		}
@@ -42,17 +42,16 @@ func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpoin
 		rec := &recorder{header: http.Header{}, status: 200}
 		s.serve(rec, askWhole(req), provider.Responses, source)
 		if rec.status >= 400 {
-			return nil, false
+			return "", false
 		}
 		reply, err := compactReply(rec.body.Bytes())
 		text := strings.TrimSpace(reply.summary())
 		if err != nil || reply.Status != "completed" || reply.Error != nil || calledTool(reply.Output) || text == "" {
-			return nil, false
+			return "", false
 		}
-		input[i], _ = json.Marshal(codexsummary.UserMessage(codexsummary.Prefix + "\n" + text))
-		return withFields(body, map[string]any{"input": input}), true
+		return codexsummary.Prefix + "\n" + text, true
 	}
-	return nil, false
+	return "", false
 }
 
 func isCheckpointItem(item []byte) bool {

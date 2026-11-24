@@ -3925,11 +3925,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	wantWhole := wantsWhole(r.Context())
 	if from == provider.Responses && (compactionTriggerIn(body) || unaryCompact(r)) {
 		watch := &compactionWatch{w: w}
+		history := body
+		scope := recoveryScope(r, body)
 		w = watch
 		defer func() {
 			if sealedBy != nil {
 				if enc := watch.sealed(); enc != "" {
-					wroteCheckpoint(enc, *sealedBy)
+					writeCheckpointRecovery(enc, *sealedBy, prepareExcerpt(history, enc, scope))
 				}
 			}
 		}()
@@ -5069,13 +5071,32 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					refused(stuck, c.vendor(), attemptBody, b)
 				}
 			}
-			// a compaction sealed where native compaction is on is never
-			// left out: its writer's refusal goes back as it came (#1099)
-			if !ok && !pass && !exportTried && checkpoint != nil && !c.sameVendor(checkpoint.Who, checkpoint.Model) {
+			if !ok && !pass && !exportTried && !compactionAside(call.Kind, call.Model) && (checkpoint == nil || !c.sameVendor(checkpoint.Who, checkpoint.Model)) && len(sealedCompactions(body)) == 1 {
 				exportTried = true
-				if bridged, recovered := s.exportCheckpoint(r, body, *checkpoint); recovered {
-					body, plain = bridged, bridged
-					try.Fail = "retry with writer's checkpoint summary"
+				text, found := offlineCheckpoint(r, body, checkpoint)
+				why := "retry with local checkpoint excerpt"
+				if found {
+					text = excerptIntro + text
+				} else if checkpoint != nil {
+					text, found = s.exportCheckpoint(r, body, *checkpoint)
+					why = "retry with writer's checkpoint summary"
+					if !found && r.Context().Err() == nil && !unaryCompact(r) && !compactionTriggerIn(body) {
+						// Old conversations may have no recoverable copy of the prefix.
+						// Leave the original thread intact. Explicitly identify the gap.
+						text = "[Magpie: earlier encrypted history is unavailable on this route.] Explain the missing history to the user. Continue from visible messages only; if references are unclear, ask for the missing details before taking action."
+						why = "retry with visible history only"
+						found = true
+					}
+				}
+				if found && !sentWhole {
+					_, masked, hits, err := maskTextHits(maskedFor(r.Context(), p, model, isGroup, ms), text)
+					found = err == nil && maskRouteFor(r, hits) == ""
+					text = masked
+				}
+				if found {
+					body = withExcerpt(body, text)
+					plain = body
+					try.Fail = why
 					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 					i--
 					continue

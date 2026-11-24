@@ -1,6 +1,3 @@
-// Routing says a conversation stays on the account that compacted it
-// natively (#1099), not that the account is the only one on for the model,
-// which read as magpie not moving to the others (#2639).
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -20,10 +17,20 @@ const route = (id, fields) => {
     id, seq: id, time: at(1), agent: "codex", model: "codex/gpt-6-astra", provider: "codex",
     order: [account], done: true, status: 200, ms: 900, tokens: 1200, ...fields,
   };
-  r.tries = [{ id: account.id, model: account.model, start: at(1), done: true, status: 200, ms: 900 }];
+  r.tries ??= [{ id: r.order[0].id, model: account.model, start: at(1), done: true, status: 200, ms: 900 }];
   return r;
 };
+const mid = { id: "mid", provider: "mid", name: "MidCode", kind: "provider", model: account.model };
+const ok = { id: mid.id, model: mid.model, start: at(1), done: true, status: 200 };
+const foreign = { order: [mid], compaction: "5x#123abc", provider: mid.id, model: "mid/" + mid.model };
+const recovered = (fail) => ({ ...foreign, tries: [{ ...ok, status: 400, fail }, ok] });
 const routes = [
+  route(109, foreign),
+  route(108, recovered("retry with local checkpoint excerpt")),
+  route(107, recovered("retry with writer's checkpoint summary")),
+  route(106, recovered("retry with visible history only")),
+  route(105, { ...foreign, status: 400, error: "rejected", tries: [{ ...ok, status: 400 }] }),
+  route(104, { ...recovered("foreign"), order: [account, mid] }),
   route(102, { compaction: account.id }),
   route(101, {}),
 ];
@@ -44,7 +51,7 @@ function serve(lang) {
     });
     if (url.pathname === "/api/gateway/trace") {
       if (url.searchParams.get("wait")) await new Promise((resolve) => setTimeout(resolve, 20e3));
-      return json({ mine: true, now: now.toISOString(), seq: 102, totals: { requests: routes.length }, routes });
+      return json({ mine: true, now: now.toISOString(), seq: 109, totals: { requests: routes.length }, routes });
     }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
@@ -60,7 +67,7 @@ function serve(lang) {
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
-    test(`${engine} ${lang}: a natively compacted conversation says why it stays`, async (t) => {
+    test(`${engine} ${lang}: native checkpoint writer, final reader and recovery`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 1200 }, reducedMotion: "reduce" });
@@ -71,19 +78,40 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang));
       await page.goto("http://magpie.test/?view=routing");
       await page.locator(".rt-req").nth(routes.length - 1).waitFor();
-      const pinned = { en: /compacted this conversation natively/, zh: /原生压缩了这条对话/, "zh-TW": /原生壓縮了這條對話/, ja: /ネイティブに圧縮/, de: /nativ komprimiert/ }[lang];
-      const only = { en: /only account on for/, zh: /唯一启用的账号/, "zh-TW": /唯一啟用的帳號/, ja: /有効なアカウントは/, de: /einzige/ }[lang];
-      const why = () => page.locator(".rt-steps li.why").first().textContent();
-
-      await page.locator(".rt-req").first().click();
-      await page.waitForFunction(() => document.querySelector(".rt-steps li.why"));
-      assert.match(await why(), pinned);
-      assert.match(await why(), /biz@example\.com/);
-      assert.doesNotMatch(await why(), only);
-
-      await page.locator(".rt-req").nth(1).click();
-      await page.waitForFunction((pattern) => !new RegExp(pattern).test(document.querySelector(".rt-steps li.why").textContent), pinned.source);
-      assert.doesNotMatch(await why(), pinned);
+      const native = { en: /native compaction item/, zh: /原生压缩项/, "zh-TW": /原生壓縮項/, ja: /ネイティブ圧縮項目/, de: /Komprimierungselement/ }[lang];
+      const why = page.locator(".rt-steps li.why").first();
+      const detail = async (i) => {
+        await page.locator(".rt-req").nth(i).click();
+        // The click schedules the story to render on the next animation frame.
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+        return (await why.textContent()).replace(/\s+/g, " ").trim();
+      };
+      const direct = await detail(0);
+      assert.match(direct, native);
+      assert.match(direct, /5x/);
+      assert.match(direct, /MidCode/);
+      if (lang === "zh") {
+        assert.equal(direct, "本轮携带 5x 生成的原生压缩项。 MidCode 直接使用原压缩项接续。");
+        if (process.env.ARTIFACT_DIR) {
+          await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+          await page.locator(".rt-steps").screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-checkpoint.png`) });
+        }
+      }
+      const modes = new Set([direct]);
+      for (let i = 1; i <= 3; i++) {
+        const text = await detail(i);
+        assert.match(text, /5x/);
+        assert.match(text, /MidCode/);
+        if (lang === "zh") assert.match(text, [/本地历史摘录/, /原写入者提供的文字摘要/, /仅使用本轮可见消息/][i-1]);
+        modes.add(text);
+      }
+      assert.equal(modes.size, 4);
+      const failed = await detail(4);
+      assert.match(failed, /5x/);
+      assert.doesNotMatch(failed, /MidCode/);
+      assert.equal(await detail(5), direct, "removing only reasoning preserves the native checkpoint");
+      assert.match(await detail(6), /biz@example\.com/);
+      assert.doesNotMatch(await detail(7), native);
       assert.deepEqual(errors, []);
     });
   }

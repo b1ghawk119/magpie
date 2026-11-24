@@ -157,3 +157,9 @@ func TestUpdateChannelSaved(t *testing.T) {
 		t.Fatalf("a refused save changed it: %q", got)
 	}
 }
+
+func TestForkRevisionAfterSameUpstream(t *testing.T) {
+	if !Newer("0.1.1+hawk.10", "0.1.1+hawk.2") || Newer("0.1.1-beta.2+hawk.10", "0.1.1+hawk.1") || Newer("0.1.1+hawk.7", "0.1.2+hawk.1") {
+		t.Fatal("fork revision outranked or failed to break an upstream tie")
+	}
+}

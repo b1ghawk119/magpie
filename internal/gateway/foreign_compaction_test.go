@@ -59,13 +59,8 @@ func (g *grokUpstream) sent() [][]string {
 	return out
 }
 
-// A Codex conversation OpenAI compacted, switched to a Grok model (waroy:
-// Grok (SuperGrok): Could not decrypt the provided encrypted_content):
-// the compaction OpenAI sealed stays in the input as well as its
-// reasoning, and Grok can read neither. With the reasoning taken out it
-// still refused the compaction, and that refusal went to Codex. Now the
-// compaction goes too once it is still refused, and later turns leave out
-// both up front while Grok's own reasoning goes along.
+// An imported conversation has no local writer record. Retry removable
+// reasoning state, but retain the only checkpoint even if the reader refuses it.
 func TestForeignCompactionToGrok(t *testing.T) {
 	fresh(t)
 	refusedSeals.Lock()
@@ -99,21 +94,11 @@ func TestForeignCompactionToGrok(t *testing.T) {
 
 	history := []string{user("start"), compaction, user("go on"), reasoning("openai"), call("c1")}
 	code, body := turn(history...)
-	if code != 200 || !strings.Contains(body, "from grok") || strings.Contains(body, "decrypt") {
-		t.Fatalf("after the switch: %d %s", code, body)
+	if strings.Contains(body, "from grok") || !strings.Contains(body, "decrypt") {
+		t.Fatalf("missing refusal: %d %s", code, body)
 	}
 	got := g.sent()
-	if len(got) != 3 || len(got[0]) != 2 || strings.Join(got[1], ",") != "compaction:sealed-by-openai-compaction" || len(got[2]) != 0 {
+	if len(got) != 2 || len(got[0]) != 2 || strings.Join(got[1], ",") != "compaction:sealed-by-openai-compaction" {
 		t.Fatalf("grok was sent %q", got)
-	}
-
-	// the next turn: neither of OpenAI's is sent to be refused again, Grok's
-	// own reasoning goes along
-	code, body = turn(append(history, reasoning("grok"), call("c2"))...)
-	if code != 200 || !strings.Contains(body, "from grok") {
-		t.Fatalf("next turn: %d %s", code, body)
-	}
-	if got := g.sent(); len(got) != 1 || strings.Join(got[0], ",") != "reasoning:sealed-by-grok" {
-		t.Fatalf("grok was then sent %q", got)
 	}
 }

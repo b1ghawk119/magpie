@@ -1,0 +1,27 @@
+name: Track upstream releases
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+concurrency: upstream-discovery
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: python fork/discover.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+  refresh:
+    runs-on: ubuntu-latest
+    concurrency: fork-update-feed
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - run: python fork/feed.py
+        env:
+          GH_TOKEN: ${{ github.token }}

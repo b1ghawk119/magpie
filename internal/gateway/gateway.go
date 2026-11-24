@@ -3435,6 +3435,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if cp, ok := checkpointOf(body); ok {
 			checkpoint = &cp
 			kept, keptPl, left := checkpointReaders(cands, pl, cp)
+			// Conversation continuations may cross native Responses routes. Preserve the
+			// known reader if this route includes it; otherwise try the selected route.
+			exporting, _ := r.Context().Value(exporterOnly{}).(bool)
+			if !exporting && !compactionAside(call.Kind, asked) && p.ID != cp.Provider {
+				// An explicit provider switch wins even if its configured fallbacks
+				// contain the writer. A group keeps the writer when available.
+				if !left || !isGroup && slices.ContainsFunc(cands, func(c candidate) bool { return c.p.ID == p.ID && s.carriesCompaction(c.p, c.model) }) {
+					kept, keptPl, left = s.compactionCarriers(cands, pl)
+				}
+			}
+
 			if !left && compactionAside(call.Kind, asked) {
 				// a call beside the conversation (an approval's review, a
 				// memory, a subagent) on a model its writer doesn't serve:
@@ -3809,13 +3820,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	promptRead := s.inspectPrompt(tr, from, body, body, sentWhole)
 	var lastTried provider.Provider // the last try's, for its model's context window and the usage's endpoint
 	var skipped []string
-	sent := ""       // the reasoning the last try's model was asked for
-	wentAt := ""     // and the level that went, once translated (wireEffort, #1636)
-	wentTier := ""   // the service tier the last try went out at (noteWireTier, #1784)
-	wentAs := ""     // the model id the last try went out under, when another than its model (wireName)
-	where := ""      // the last try's provider.Where, for the usage
-	again := 0       // times the last one left has been tried again
-	planAgain := 0   // times a group's member was asked again in place for the Qwen Token Plan's concurrency 429 (qwenPlanBusy)
+	sent := ""     // the reasoning the last try's model was asked for
+	wentAt := ""   // and the level that went, once translated (wireEffort, #1636)
+	wentTier := "" // the service tier the last try went out at (noteWireTier, #1784)
+	wentAs := ""   // the model id the last try went out under, when another than its model (wireName)
+	where := ""    // the last try's provider.Where, for the usage
+	again := 0     // times the last one left has been tried again
+	planAgain := 0 // times a group's member was asked again in place for the Qwen Token Plan's concurrency 429 (qwenPlanBusy)
+	exportTried := false
 	resealed := 0    // what of the conversation another account sealed was taken out: its reasoning, then its compaction
 	repicked := 0    // times Copilot's Auto was asked again for a model the account is served
 	floored := false // the reply's length raised to what the provider takes
@@ -4178,7 +4190,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// asked again, of it or of the next candidate. Only a stream the
 		// agent has the headers of already is held, to be told in it
 		pass := c.p.PassesErrors()
-		hw := newHoldWriter(w, kept.sent || !pass && (!last || len(briefLeft) > 0 || again < max(lastRetries, rateRetries) || other != nil || autoPicks(c) && repicked < 2 ||
+		hw := newHoldWriter(w, kept.sent || !pass && (checkpoint != nil || !last || len(briefLeft) > 0 || again < max(lastRetries, rateRetries) || other != nil || autoPicks(c) && repicked < 2 ||
 			patience > 0 && rounds < replanRounds && (waitFrom.IsZero() || time.Since(waitFrom) < patience) || wantWhole))
 		// a compaction's summary is held to its end, for a cut or an
 		// error halfway to go to the next candidate (#2274)
@@ -5062,6 +5074,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			// a compaction sealed where native compaction is on is never
 			// left out: its writer's refusal goes back as it came (#1099)
+			if !ok && !pass && !exportTried && checkpoint != nil && !c.sameVendor(checkpoint.Who, checkpoint.Model) {
+				exportTried = true
+				if bridged, recovered := s.exportCheckpoint(r, body, *checkpoint); recovered {
+					body, plain = bridged, bridged
+					try.Fail = "retry with writer's checkpoint summary"
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					i--
+					continue
+				}
+			}
 			if !ok && checkpoint == nil && !s.compactsNatively(c.p, c.model) {
 				resealed = 2
 				if b, ok = withoutCompaction(body); ok {

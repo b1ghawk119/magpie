@@ -41,6 +41,10 @@ request is still 404, and `unknownModel` says the model is gone and to pick
 another for the conversation instead of listing every id
 (`provider.GoneAutoGroup`; canlee886 on X, `TestFoundGroupGoneGoesToItsModel`).
 
+## Cross-provider native checkpoints (downstream)
+
+A main conversation explicitly routed away from its checkpoint writer tries the available Responses carriers in its chosen route with the original item. An explicit destination with a ready native carrier can be used even when the old writer is a configured fallback. A routing group retains its known writer when available. Generation still follows the provider's native compaction setting. On an identified encrypted-content failure before client output, the gateway can ask the recorded writer for a text summary of its checkpoint alone and replay the turn on the destination. An incomplete export leaves the upstream error visible. The export follows normal model and account authorization. See `internal/gateway/checkpoint_transfer.go` and `TestCrossProviderUsesWriterSummaryAfterRejection`.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

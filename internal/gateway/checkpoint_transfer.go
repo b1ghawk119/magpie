@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"github.com/yetone/magpie/internal/codexsummary"
-	"github.com/yetone/magpie/internal/provider"
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/yetone/magpie/internal/codexsummary"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // exporterOnly marks a summary call that can only go to the recorded writer.
@@ -17,12 +19,13 @@ type exporterOnly struct{}
 // user turns and tool results stay on the chosen route. Multiple seals require
 // separate provenance and are left intact rather than folded speculatively.
 func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpointWriter) ([]byte, bool) {
-	if writer.Model == "" || len(sealedCompactions(body)) != 1 {
+	seals := sealedCompactions(body)
+	if writer.Model == "" || len(seals) != 1 {
 		return nil, false
 	}
 	input := compactInput(body)
 	for i, item := range input {
-		if len(sealedCompactions(withFields([]byte(`{}`), map[string]any{"input": []json.RawMessage{item}}))) == 0 {
+		if gjson.GetBytes(item, "encrypted_content").Str != seals[0] || !isCheckpointItem(item) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), compactWithin)
@@ -33,7 +36,8 @@ func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpoin
 		req.URL.Path = "/v1/responses"
 		req.URL.RawQuery = ""
 		req.Header.Del("X-Codex-Turn-State")
-		req.Header.Del("previous_response_id")
+		req.Header.Del(turnMetadataHeader)
+		req.Header.Del("x-codex-window-id")
 		source, _ := json.Marshal(map[string]any{"model": writer.Provider + "/" + writer.Model, "stream": true, "store": false, "tools": []any{}, "instructions": codexCompactPrompt, "input": []any{item, userMessage(codexCompactPrompt)}})
 		rec := &recorder{header: http.Header{}, status: 200}
 		s.serve(rec, askWhole(req), provider.Responses, source)
@@ -49,4 +53,14 @@ func (s *Server) exportCheckpoint(r *http.Request, body []byte, writer checkpoin
 		return withFields(body, map[string]any{"input": input}), true
 	}
 	return nil, false
+}
+
+func isCheckpointItem(item []byte) bool {
+	kind := gjson.GetBytes(item, "type").Str
+	for _, k := range compactionKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }

@@ -9,7 +9,7 @@ def run(*args,cwd=None):
     return subprocess.check_output(args,cwd=cwd,text=True).strip()
 rows=json.loads(run('gh','release','list','-R',repo,'-L','1000','--exclude-drafts','--json','tagName,isPrerelease,name'))
 rows=sorted((r for r in rows if r['tagName'].endswith('+hawk.1')),key=lambda r:Version(r['tagName'][1:-7]),reverse=True)
-if not rows: raise RuntimeError('No finished fork release')
+if not rows: raise SystemExit(0)  # First build is still running.
 with tempfile.TemporaryDirectory() as tmp:
     feed=Path(tmp); remote=f'https://github.com/{repo}.git'
     run('git','init','-q','-b','update-feed',tmp)

@@ -253,13 +253,11 @@ func TestNativeCompactionFallbackSealStaysWithItsWriter(t *testing.T) {
 		t.Fatalf("cross-provider without native generation: %d %s; got %s", code, body, other.got)
 	}
 	fb.reply = done
+	noRests() // FA is available again for the explicit switch.
 	fa.got, fb.got = nil, nil
 	code, body = nativeAsk(t, "fa/m1", next)
-	if code != 200 || !strings.Contains(string(fb.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) {
-		t.Errorf("the writer: %d %s\nfb got %s", code, body, fb.got)
-	}
-	if strings.Contains(string(fa.got), "gAAAAB-sealed-by-fb") {
-		t.Errorf("fa, which can't read it, was sent it: %s", fa.got)
+	if code != 200 || !strings.Contains(string(fa.got), `"encrypted_content":"gAAAAB-sealed-by-fb"`) || fb.got != nil {
+		t.Fatalf("explicit route with writer as fallback: %d %s; primary %s, writer %s", code, body, fa.got, fb.got)
 	}
 }
 

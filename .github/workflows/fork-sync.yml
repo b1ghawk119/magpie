@@ -15,3 +15,13 @@ jobs:
       - run: python fork/discover.py
         env:
           GH_TOKEN: ${{ github.token }}
+  refresh:
+    runs-on: ubuntu-latest
+    concurrency: fork-update-feed
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - run: python fork/feed.py
+        env:
+          GH_TOKEN: ${{ github.token }}

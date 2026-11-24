@@ -3435,8 +3435,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// Conversation continuations may cross native Responses routes. Preserve the
 			// known reader if this route includes it; otherwise try the selected route.
 			exporting, _ := r.Context().Value(exporterOnly{}).(bool)
-			if !left && !exporting && p.ID != cp.Provider && !compactionAside(call.Kind, asked) {
-				kept, keptPl, left = s.compactionCarriers(cands, pl)
+			if !exporting && !compactionAside(call.Kind, asked) && p.ID != cp.Provider {
+				// An explicit provider switch wins even if its configured fallbacks
+				// contain the writer. A group keeps the writer when available.
+				if !left || !isGroup && slices.ContainsFunc(cands, func(c candidate) bool { return c.p.ID == p.ID && s.carriesCompaction(c.p, c.model) }) {
+					kept, keptPl, left = s.compactionCarriers(cands, pl)
+				}
 			}
 
 			if !left && compactionAside(call.Kind, asked) {
